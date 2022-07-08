@@ -2,6 +2,7 @@ import logging
 import os
 import sys
 import time
+import json
 from http import HTTPStatus
 from logging import StreamHandler
 from logging.handlers import RotatingFileHandler
@@ -87,20 +88,27 @@ def get_api_answer(current_timestamp):
     timestamp = current_timestamp or int(time.time())
     params = {'from_date': timestamp}
     logger.info('Отправляю запрос к ENDPOINT')
-    response = requests.get(ENDPOINT, headers=HEADERS, params=params)
-    if response.status_code == HTTPStatus.OK:
-        logger.info('Ответ от ENDPOINT получен')
-        try:
-            return response.json()
-        except AttributeError:
-            error_msg = 'В ответ на запрос API выдал не JSON'
+    try:
+        response = requests.get(ENDPOINT, headers=HEADERS, params=params)
+        if response.status_code == HTTPStatus.OK:
+            logger.info('Ответ от ENDPOINT получен')
+            try:
+                return response.json()
+            except json.decoder.JSONDecodeError:
+                logger.error('Сервер вернул невалидный json')
+            except AttributeError:
+                error_msg = 'В ответ на запрос API выдал не JSON'
+                logger.error(error_msg)
+                raise AttributeError(error_msg)
+        else:
+            error_msg = (f'Ошибка соединения с сервером '
+                         f'(ответ {response.status_code}).')
             logger.error(error_msg)
-            raise AttributeError(error_msg)
-    else:
-        error_msg = (f'Ошибка соединения с сервером '
-                     f'(ответ{response.status_code}).')
+            raise ConnectionError(error_msg)
+    except requests.exceptions.RequestException as error:
+        error_msg = (f'Ошибка при отправке запроса к API: '
+                     f'{error}.')
         logger.error(error_msg)
-        raise ConnectionError(error_msg)
 
 
 def check_response(response):
@@ -127,7 +135,7 @@ def check_response(response):
         logger.error(error_msg)
         raise KeyError(error_msg)
     if not response['homeworks']:
-        return {}
+        return []
     homeworks_list = response.get('homeworks')
     if not isinstance(homeworks_list, list):
         error_msg = ('homeworks в ответе API не соответствует типу list')
@@ -147,8 +155,8 @@ def parse_status(homework):
     """
     homework_name = homework.get('homework_name')
     if homework_name is None:
-        msg = ('Ошибка обращения по ключу homework_name')
-        raise KeyError(msg)
+        error_msg = ('Ошибка обращения по ключу homework_name')
+        raise KeyError(error_msg)
     homework_status = homework.get('status')
     if homework_status is None:
         raise KeyError(f'Ошибка в homework_status: {homework_status}')
@@ -196,6 +204,7 @@ def main():
     current_timestamp = int(time.time())
 
     status_old = ''
+    sent_errors_list = []
 
     while True:
         try:
@@ -209,13 +218,14 @@ def main():
             current_timestamp = response.get('current_date')
 
         except APIResponseStatusCodeException as error:
-            error_message = f'Ошибка при запросе к API: {error}'
-            status_old = error_message
-            logging.error(error_message)
-            send_message(bot, error_message)
+            error_msg = f'Ошибка при запросе к API: {error}'
+            logger.error(error_msg)
+            if error_msg not in sent_errors_list:
+                send_message(bot, error_msg)
+                sent_errors_list.append(error_msg)
         except telegram.error.TelegramError as telegram_error:
-            error_message = f'Ошибка в работе Telegramm: {telegram_error}'
-            logging.error(error_message)
+            error_msg = f'Ошибка в работе Telegramm: {telegram_error}'
+            logger.error(error_msg)
         finally:
             time.sleep(RETRY_TIME)
 
